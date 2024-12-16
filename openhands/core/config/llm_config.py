@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, fields
-from typing import Optional
+from typing import Literal, Optional
 
 from openhands.core.config.config_utils import get_field_info
 from openhands.core.logger import LOG_DIR
@@ -81,6 +81,10 @@ class LLMConfig:
     draft_editor: Optional['LLMConfig'] = None
     custom_tokenizer: str | None = None
     modify_params: bool = True
+    # MBR config
+    mbr_num_sequences: int = 1
+    mbr_metric: Literal['cos_sim', 'bart_score', 'comb'] | None = None
+    mbr_model_name: str = 'mixedbread-ai/mxbai-embed-large-v1'
 
     def defaults_to_dict(self) -> dict:
         """Serialize fields to a dict for the frontend, including type hints, defaults, and whether it's optional."""
@@ -100,6 +104,15 @@ class LLMConfig:
             os.environ['OR_SITE_URL'] = self.openrouter_site_url
         if self.openrouter_app_name:
             os.environ['OR_APP_NAME'] = self.openrouter_app_name
+
+        # MBR validation checks
+        if self.mbr_num_sequences > 1:
+            if not self.mbr_metric:
+                raise ValueError(
+                    'mbr_metric must be specified when mbr_num_sequences > 1'
+                )
+            if self.mbr_metric not in ['cos_sim', 'bart_score', 'comb']:
+                raise ValueError('mbr_metric must be one of: cos_sim, bart_score, comb')
 
     def __str__(self):
         attr_str = []

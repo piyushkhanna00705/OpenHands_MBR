@@ -8,6 +8,9 @@ from typing import Any
 import requests
 
 from openhands.core.config import LLMConfig
+from openhands.llm.rerankers import (
+    CosineSimilarityReRanker,
+)
 
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
@@ -100,6 +103,9 @@ class LLM(RetryMixin, DebugMixin):
         )
         self.cost_metric_supported: bool = True
         self.config: LLMConfig = copy.deepcopy(config)
+        self.num_sequences = (
+            config.mbr_num_sequences if config.mbr_num_sequences > 1 else 1
+        )
 
         # litellm actually uses base Exception here for unknown model
         self.model_info: ModelInfo | None = None
@@ -130,6 +136,21 @@ class LLM(RetryMixin, DebugMixin):
             self.tokenizer = None
 
         # set up the completion function
+        # Initialize MBR reranker if enabled
+        self.mbr_reranker = None
+        if config.mbr_num_sequences > 1 and config.mbr_metric:
+            if config.mbr_metric == 'cos_sim':
+                self.mbr_reranker = CosineSimilarityReRanker(config.mbr_model_name)
+            # elif config.mbr_metric == 'bart_score':
+            #     self.mbr_reranker = BARTScoreReRanker(config.mbr_model_name)
+            # elif config.mbr_metric == 'comb':
+            #     self.mbr_reranker = CombReranker(
+            #         [
+            #             CosineSimilarityReRanker(config.mbr_model_name),
+            #             BARTScoreReRanker(config.mbr_model_name),
+            #         ]
+            #     )
+
         self._completion = partial(
             litellm_completion,
             model=self.config.model,
@@ -143,6 +164,7 @@ class LLM(RetryMixin, DebugMixin):
             top_p=self.config.top_p,
             drop_params=self.config.drop_params,
             modify_params=self.config.modify_params,
+            n=config.mbr_num_sequences if config.mbr_num_sequences > 1 else None,
         )
 
         self._completion_unwrapped = self._completion
@@ -218,6 +240,11 @@ class LLM(RetryMixin, DebugMixin):
                 latency = time.time() - start_time
                 response_id = resp.get('id', 'unknown')
                 self.metrics.add_response_latency(latency, response_id)
+                if self.config.mbr_num_sequences > 1:
+                    kwargs['n'] = self.config.mbr_num_sequences
+
+                if self.config.mbr_num_sequences > 1:
+                    resp = self._mbr_decoding(resp)
 
                 non_fncall_response = copy.deepcopy(resp)
                 if mock_function_calling:
@@ -297,6 +324,45 @@ class LLM(RetryMixin, DebugMixin):
         Check the complete documentation at https://litellm.vercel.app/docs/completion
         """
         return self._completion
+
+    def _mbr_decoding(self, response: ModelResponse) -> ModelResponse:
+        """Apply MBR decoding to select the best candidate.
+
+        Args:
+            response: ModelResponse containing multiple candidate completions
+
+        Returns:
+            ModelResponse with only the best candidate selected
+        """
+        # Extract candidates from the response
+        candidates = [choice.message['content'] for choice in response.choices]
+
+        if len(candidates) <= 1:
+            return response
+
+        # Use the configured reranker to score the candidates
+        if self.mbr_reranker is None:
+            raise ValueError(
+                'MBR reranker not initialized but MBR decoding was requested'
+            )
+
+        # Get scores from the reranker
+        scores = self.mbr_reranker(candidates)
+
+        # Select the candidate with the highest score
+        best_index = scores.index(max(scores))
+        best_candidate = response.choices[best_index]
+
+        # Update the response to only include the best candidate
+        response.choices = [best_candidate]
+
+        # Log the MBR selection
+        logger.debug(
+            f'MBR selected candidate {best_index} with score {scores[best_index]}'
+        )
+        logger.debug(f'All candidate scores: {scores}')
+
+        return response
 
     def init_model_info(self):
         if self._tried_model_info:
