@@ -163,7 +163,6 @@ class LLM(RetryMixin, DebugMixin):
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             drop_params=self.config.drop_params,
-            modify_params=self.config.modify_params,
             n=config.mbr_num_sequences if config.mbr_num_sequences > 1 else None,
         )
 
